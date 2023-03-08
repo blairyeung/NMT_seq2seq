@@ -41,21 +41,27 @@ class Encoder(EncoderBase):
         # 3. cell_type will be one of: ['lstm', 'rnn']
         # 4. Relevant pytorch modules: torch.nn.{LSTM, RNN, Embedding}
 
-        module_types = {'lstm', 'rnn'}
-        models = {'lstm': torch.nn.LSTM, 'rnn': torch.nn.RNN}
-
         # Create embedding to convert discrete one-hot encoding to continuous fdrvp
 
         self.embedding = torch.nn.Embedding(num_embeddings=self.source_vocab_size,
                                             embedding_dim=self.word_embedding_size,
                                             padding_idx=self.pad_id)
 
-        # Create the rnn
-        self.rnn = models[self.cell_type](input_size=self.word_embedding_size,
-                                          hidden_size=self.hidden_state_size,
-                                          num_layers=self.num_hidden_layers,
-                                          dropout=self.dropout,
-                                          bidirectional=True)
+        if self.cell_type == 'lstm':
+            self.rnn = torch.nn.LSTM(input_size=self.word_embedding_size,
+                                     hidden_size=self.hidden_state_size,
+                                     num_layers=self.num_hidden_layers,
+                                     dropout=self.dropout,
+                                     bidirectional=True)
+        elif self.cell_type == 'rnn':
+            self.rnn = torch.nn.RNN(input_size=self.word_embedding_size,
+                                    hidden_size=self.hidden_state_size,
+                                    num_layers=self.num_hidden_layers,
+                                    dropout=self.dropout,
+                                    bidirectional=True)
+
+        else:
+            raise ValueError(f"Invalid cell_type '{self.cell_type}'. Must be 'lstm' or 'rnn'.")
 
         return
 
@@ -77,6 +83,7 @@ class Encoder(EncoderBase):
 
         embedding = self.get_all_rnn_inputs(source_x)
 
+        # result of forward pass is handled  in the following function
         return self.get_all_hidden_states(embedding, source_x_lens, h_pad)
 
     def get_all_rnn_inputs(self, source_x: torch.LongTensor) -> torch.FloatTensor:
@@ -101,6 +108,9 @@ class Encoder(EncoderBase):
         # Hint:
         #   relevant pytorch modules:
         #   torch.nn.utils.rnn.{pad_packed,pack_padded}_sequence
+
+        # According to pytorch doc, output comprises all the hidden states in the last layer, we retrive such data
+        # and process it
         packed = torch.nn.tutils.rnn.pack_padded_sequence(input=x, lengths=source_x_lens, enforce_sorted=False)
 
         # Get the output
@@ -126,17 +136,25 @@ class DecoderWithoutAttention(DecoderBase):
         # 4. Relevant pytorch modules:
         #   torch.nn.{Embedding, Linear, LSTMCell, RNNCell}
 
-        models = {'lstm': torch.nn.LSTM, 'rnn': torch.nn.RNN}
-
         self.embedding = torch.nn.Embedding(num_embeddings=self.source_vocab_size,
                                             embedding_dim=self.word_embedding_size,
                                             padding_idx=self.pad_id)
 
-        self.rnn = models[self.cell_type](input_size=self.word_embedding_size,
-                                          hidden_size=self.hidden_state_size,
-                                          num_layers=self.num_hidden_layers,
-                                          dropout=self.dropout,
-                                          bidirectional=True)
+        if self.cell_type == 'lstm':
+            self.rnn = torch.nn.LSTM(input_size=self.word_embedding_size,
+                                     hidden_size=self.hidden_state_size,
+                                     num_layers=self.num_hidden_layers,
+                                     dropout=self.dropout,
+                                     bidirectional=True)
+        elif self.cell_type == 'rnn':
+            self.rnn = torch.nn.RNN(input_size=self.word_embedding_size,
+                                    hidden_size=self.hidden_state_size,
+                                    num_layers=self.num_hidden_layers,
+                                    dropout=self.dropout,
+                                    bidirectional=True)
+
+        else:
+            raise ValueError(f"Invalid cell_type '{self.cell_type}'. Must be 'lstm' or 'rnn'.")
 
         self.output_layer = torch.nn.Linear(in_features=self.hidden_state_size,
                                             out_features=self.target_vocab_size)
