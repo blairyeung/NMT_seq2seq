@@ -39,7 +39,7 @@ commands of the party'''.strip().split()
 
     ## Unigram precision
     p1_hat = a2_bleu_score.n_gram_precision(reference, candidate, 1)
-    p1 = 15 / 18    # w/o capping
+    p1 = 15 / 18    # w/o cappinga
     assert np.isclose(p1_hat, p1)
 
     ## Bi-gram precision

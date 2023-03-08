@@ -85,7 +85,31 @@ def train_for_epoch(
     # If you are running into CUDA memory errors part way through training,
     # try "del source_x, source_x_lens, target_y, logits, loss" at the end of each iteration of
     # the loop.
-    assert False, "Fill me"
+
+    loss_fun = torch.nn.CrossEntropyLoss(ignore_index=model.source_pad_id, reduction="mean")
+
+    losses = []
+
+    for F, F_lens, E in tqdm(dataloader):
+        F = F.to(device)
+        F_lens = F_lens.to(device)
+        E = E.to(device)
+
+        optimizer.zero_grad()
+        logits = model(F, F_lens, E)
+
+        E = torch.masked_fill(E, model.get_target_padding_mask(E), model.source_pad_id)
+
+        logits = logits.reshape(logits.shape[0] * logits.shape[1], logits.shape[2]).to(device)
+        E = E[1:].reshape(-1).to(device)
+
+        loss = loss_fun(logits, E)
+        loss.backward()
+        optimizer.step()
+
+        losses.append(loss.item())
+
+    return torch.mean(torch.tensor(losses))
 
 
 def compute_batch_total_bleu(
@@ -116,7 +140,18 @@ def compute_batch_total_bleu(
     '''
     # you can use target_y_ref.tolist() to convert the LongTensor to a python list
     # of numbers
-    assert False, "Fill me"
+    ref = target_y_ref.transpose(0, 1)
+    cand = target_y_cand.transpose(0, 1)
+
+    bleu = 0
+
+    for idx in range(len(ref)):
+        r = ref[idx][~((ref[idx] == target_sos) | (ref[idx] == target_eos))]
+        c = cand[idx][~((cand[idx] == target_sos) | (cand[idx] == target_eos))]
+        bleu += a2_bleu_score.BLEU_score(r.tolist(), c.tolist(), 4)
+
+    return bleu
+
 
 
 def compute_average_bleu_over_dataset(
@@ -158,4 +193,16 @@ def compute_average_bleu_over_dataset(
         The total BLEU score summed over all sequences divided by the number of
         sequences
     '''
-    assert False, "Fill me"
+
+    no_batch = 0
+    bleu_score = 0
+    for F, F_lens, E_ref in dataloader:
+        F = F.to(device)
+        F_lens = F_lens.to(device)
+        E_ref = E_ref.to(device)
+
+        E_cand = model(F, F_lens)[:, :, 0]  # Most likely translation
+        no_batch += F_lens.shape[0]
+        bleu_score += compute_batch_total_bleu(E_ref, E_cand, target_sos, target_eos)
+
+    return bleu_score / no_batch
