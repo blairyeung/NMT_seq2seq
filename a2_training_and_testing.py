@@ -86,27 +86,33 @@ def train_for_epoch(
     # try "del source_x, source_x_lens, target_y, logits, loss" at the end of each iteration of
     # the loop.
 
-    loss_fun = torch.nn.CrossEntropyLoss(ignore_index=model.source_pad_id, reduction="mean")
+    loss_fn = torch.nn.CrossEntropyLoss(ignore_index=model.source_pad_id, reduction="mean")
 
     losses = []
 
-    for F, F_lens, E in tqdm(dataloader):
-        F = F.to(device)
-        F_lens = F_lens.to(device)
-        E = E.to(device)
+    for source_x, source_x_lens, target_y in tqdm(dataloader):
+        source_x = source_x.to(device)
+        source_x_lens = source_x_lens.to(device)
+        target_y = target_y.to(device)
 
         optimizer.zero_grad()
-        logits = model(F, F_lens, E)
+        
+        # Compute the perdiciton
+        logits = model(source_x, source_x_lens, target_y)
+        target_y = torch.masked_fill(target_y, model.get_target_padding_mask(target_y), model.source_pad_id)
 
-        E = torch.masked_fill(E, model.get_target_padding_mask(E), model.source_pad_id)
-
+        # Reshape them for loss calculation
         logits = logits.reshape(logits.shape[0] * logits.shape[1], logits.shape[2]).to(device)
-        E = E[1:].reshape(-1).to(device)
+        target_y = target_y[1:].reshape(-1).to(device)
 
-        loss = loss_fun(logits, E)
+        loss = loss_fn(logits, target_y)
+
+        # Backward propagate the loss
         loss.backward()
+        
+        # Optimize
         optimizer.step()
-
+        
         losses.append(loss.item())
 
     return torch.mean(torch.tensor(losses))
@@ -146,9 +152,13 @@ def compute_batch_total_bleu(
     bleu = 0
 
     for idx in range(len(ref)):
-        r = ref[idx][~((ref[idx] == target_sos) | (ref[idx] == target_eos))]
-        c = cand[idx][~((cand[idx] == target_sos) | (cand[idx] == target_eos))]
-        bleu += a2_bleu_score.BLEU_score(r.tolist(), c.tolist(), 4)
+        ref_sequence= ref[idx]
+        cand_sequence = cand[idx]
+
+        ref_sentence = [i for i in ref_sequence if (i != target_eos and i != target_sos)]
+        cand_sentence = [i for i in cand_sequence if (i != target_eos and i != target_sos)]
+        
+        bleu += a2_bleu_score.BLEU_score(ref_sentence, cand_sentence, 4)
 
     return bleu
 
@@ -195,14 +205,19 @@ def compute_average_bleu_over_dataset(
     '''
 
     no_batch = 0
-    bleu_score = 0
-    for F, F_lens, E_ref in dataloader:
-        F = F.to(device)
-        F_lens = F_lens.to(device)
-        E_ref = E_ref.to(device)
+    total_bleu = 0
+    with torch.no_grad():
+        for source_x, source_x_lens, target_y_ref in dataloader:
+            
+            source_x = source_x.to(device)
+            source_x_lens = source_x_lens.to(device)
+            target_y_ref = target_y_ref.to(device)
+            
+            # Predict
+            target_y_cand = model(source_x, source_x_lens)[:, :, 0]
 
-        E_cand = model(F, F_lens)[:, :, 0]  # Most likely translation
-        no_batch += F_lens.shape[0]
-        bleu_score += compute_batch_total_bleu(E_ref, E_cand, target_sos, target_eos)
+            # Plus the number of batches
+            no_batch += source_x_lens.shape[0]
+            total_bleu += compute_batch_total_bleu(target_y_ref, target_y_cand, target_sos, target_eos)
 
-    return bleu_score / no_batch
+    return total_bleu / no_batch if no_batch > 0 else 0

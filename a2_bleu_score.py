@@ -77,7 +77,7 @@ def n_gram_precision(reference:Sequence[str], candidate:Sequence[str], n:int) ->
         if ngram in reference_lst:
             counter += 1
 
-    return counter / len(candidate_lst)
+    return counter / len(candidate_lst) if not len(candidate_lst) == 0 else 0
 
 
 def brevity_penalty(reference:Sequence[str], candidate:Sequence[str]) -> float:
@@ -131,6 +131,6 @@ def BLEU_score(reference:Sequence[str], candidate:Sequence[str], n) -> float:
         prec = n_gram_precision(reference, candidate, i + 1)
         bleu *= prec
 
-    bleu = bleu ** (1 / n) * BP
+    bleu = (bleu ** (1 / n)) * BP
 
     return bleu

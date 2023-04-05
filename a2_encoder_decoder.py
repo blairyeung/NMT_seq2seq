@@ -53,6 +53,7 @@ class Encoder(EncoderBase):
                                      num_layers=self.num_hidden_layers,
                                      dropout=self.dropout,
                                      bidirectional=True)
+            
         elif self.cell_type == 'rnn':
             self.rnn = torch.nn.RNN(input_size=self.word_embedding_size,
                                     hidden_size=self.hidden_state_size,
@@ -111,7 +112,8 @@ class Encoder(EncoderBase):
 
         # According to pytorch doc, output comprises all the hidden states in the last layer, we retrive such data
         # and process it
-        packed = torch.nn.tutils.rnn.pack_padded_sequence(input=x, lengths=source_x_lens, enforce_sorted=False)
+        packed = torch.nn.utils.rnn.pack_padded_sequence(x, lengths=source_x_lens.cpu(),
+                                                         enforce_sorted=False)
 
         # Get the output
         h_packed, _ = self.rnn(packed)
@@ -136,22 +138,18 @@ class DecoderWithoutAttention(DecoderBase):
         # 4. Relevant pytorch modules:
         #   torch.nn.{Embedding, Linear, LSTMCell, RNNCell}
 
-        self.embedding = torch.nn.Embedding(num_embeddings=self.source_vocab_size,
+        self.embedding = torch.nn.Embedding(num_embeddings=self.target_vocab_size,
                                             embedding_dim=self.word_embedding_size,
                                             padding_idx=self.pad_id)
 
         if self.cell_type == 'lstm':
-            self.rnn = torch.nn.LSTM(input_size=self.word_embedding_size,
-                                     hidden_size=self.hidden_state_size,
-                                     num_layers=self.num_hidden_layers,
-                                     dropout=self.dropout,
-                                     bidirectional=True)
+            self.cell = torch.nn.LSTMCell(
+                                        input_size=self.word_embedding_size,
+                                        hidden_size=self.hidden_state_size)
         elif self.cell_type == 'rnn':
-            self.rnn = torch.nn.RNN(input_size=self.word_embedding_size,
-                                    hidden_size=self.hidden_state_size,
-                                    num_layers=self.num_hidden_layers,
-                                    dropout=self.dropout,
-                                    bidirectional=True)
+            self.cell = torch.nn.RNNCell(
+                                        input_size=self.word_embedding_size,
+                                        hidden_size=self.hidden_state_size)
 
         else:
             raise ValueError(f"Invalid cell_type '{self.cell_type}'. Must be 'lstm' or 'rnn'.")
@@ -217,8 +215,9 @@ class DecoderWithoutAttention(DecoderBase):
         #   with the hidden states of the encoder's backward direction at time
         #   t=0
         # 2. Relevant pytorch function: torch.cat
-        forward = h[source_x_lens - 1, [_ for _ in range(source_x_lens.shape[0])], :self.hidden_state_size // 2]
-        backward = h[0, :, self.hidden_state_size // 2:]
+        # forward = h[source_x_lens - 1, [_ for _ in range(source_x_lens.shape[0])], :self.hidden_state_size // 2]
+        forward = h[source_x_lens - 1,  torch.arange(source_x_lens.shape[0]), :self.hidden_state_size // 2]
+        backward = h[0,  torch.arange(source_x_lens.shape[0]), self.hidden_state_size // 2:]
         return torch.cat((forward, backward), dim=1).to(h.device)
 
     def get_current_rnn_input(
@@ -235,7 +234,7 @@ class DecoderWithoutAttention(DecoderBase):
         #   h is of shape (S, B, 2 * H)
         #   source_x_lens is of shape (B,)
         #   xtilde_t (output) is of shape (B, Itilde)
-        return self.embedding(htilde_tm1)
+        return self.embedding(target_y_tm1)
 
     def get_current_hidden_state(
             self,
@@ -282,12 +281,18 @@ class DecoderWithAttention(DecoderWithoutAttention):
         #   torch.nn.{Embedding, Linear, LSTMCell, RNNCell, GRUCell}
         # 5. The implementation of this function should be different from
         #   DecoderWithoutAttention.init_submodules.
-        cells = {"lstm": torch.nn.LSTMCell, "rnn": torch.nn.RNNCell}
 
         # Now since we have to work with attention, input size has to address context vectors
-        self.cell = cells[self.cell_type](input_size=self.word_embedding_size + self.hidden_state_size,
+        if self.cell_type == 'lstm':
+            self.cell = torch.nn.LSTMCell(input_size=self.word_embedding_size + self.hidden_state_size,
                                           hidden_size=self.hidden_state_size)
-
+        elif self.cell_type == 'rnn':
+            self.cell = torch.nn.RNNCell(input_size=self.word_embedding_size + self.hidden_state_size,
+                                        hidden_size=self.hidden_state_size)
+        
+        else:
+            raise ValueError(f"Invalid cell_type '{self.cell_type}'. Must be 'lstm' or 'rnn'.")
+           
         self.embedding = torch.nn.Embedding(num_embeddings=self.target_vocab_size,
                                             embedding_dim=self.word_embedding_size,
                                             padding_idx=self.pad_id)
@@ -312,8 +317,11 @@ class DecoderWithAttention(DecoderWithoutAttention):
             h: torch.FloatTensor,
             source_x_lens: torch.LongTensor) -> torch.FloatTensor:
         # Hint: Use attend() for c_t
-
+        
+        # Embedding previous token
         embedded = self.embedding(target_y_tm1)
+        
+        # Get the context vector
         c_t = self.attend(htilde_tm1, h, source_x_lens)
 
         return torch.cat((embedded, c_t), dim=1).to(h.device)
@@ -351,13 +359,14 @@ class DecoderWithAttention(DecoderWithoutAttention):
 
         Hint: Use get_attention_weights() to calculate alpha_t.
         '''
+        
+        # Compute the attention weights
         alpha_t = self.get_attention_weights(htilde_t, h, source_x_lens)
 
         alpha_trans = alpha_t.unsqueeze(dim=1).transpose(0, 2)
 
-        h_trans = h.transpose(0, 1)
-
-        return torch.matmul(alpha_trans, h_trans).squeeze(1)
+        # Multiply it with the hidden states, to get the attention score (unormlalized)
+        return torch.matmul(alpha_trans, h.transpose(0, 1)).squeeze(1)
 
     def get_attention_weights(
             self,
@@ -390,7 +399,8 @@ class DecoderWithAttention(DecoderWithoutAttention):
         # Hint:
         # Relevant pytorch function: torch.nn.functional.cosine_similarity
         if self.cell_type == "lstm":
-            return torch.nn.CosineSimilarity(dim=-1)(htilde_t[0], h)
+            hidden = htilde_t[0]
+            return torch.nn.CosineSimilarity(dim=-1)(hidden, h)
         else:
             return torch.nn.CosineSimilarity(dim=-1)(htilde_t, h)
 
@@ -440,21 +450,26 @@ def attend(
     #   tensor([1,1,2,2,3,3,4,4]), just like numpy.repeat.
     # 4. You *WILL* need self.heads at this point
 
-    if self.cell_type == "lstm":
-        htilde_t_n = (self.Wtilde(htilde_t[0]).view(h.shape[1] * self.heads, h.shape[2] // self.heads),
-                      htilde_t[1].view(h.shape[1] * self.heads, h.shape[2] // self.heads))
+    # Firstly we get the hidden state
+    if self.cell_type == 'lstm':
+        hidden = htilde_t[0]
+        cell = htilde_t[1]
+        htilde_t_n = (self.Wtilde(hidden).view(h.shape[1] * self.heads, h.shape[2] // self.heads),
+                      cell.view(h.shape[1] * self.heads, h.shape[2] // self.heads))
+        
     else:
         htilde_t_n = self.Wtilde(htilde_t).view(h.shape[1] * self.heads, h.shape[2] // self.heads)
 
-        # Transformation: h_n = S * MK * H/K, after applying linear layer
+    # Then we multiply it with the weight matrix
     h_n = self.W(h).view(h.shape[0], h.shape[1] * self.heads, h.shape[2] // self.heads)
 
+    # Repeat them head times
     lens_n = source_x_lens.repeat_interleave(self.heads)
 
-    # Call attend (for single-head) and transform from MK * H/K to M * H context vector
+    # Get the context vector by calling super, since the process is essentially the same, only thing that
+    # differs is the dimensionality
     c_t_n = super().attend(htilde_t_n, h_n, lens_n).view(h.shape[1], h.shape[2])
 
-    # Apply a final linear layer
     return self.Q(c_t_n)
 
 
@@ -525,49 +540,28 @@ class EncoderDecoder(EncoderDecoderBase):
         tokens = self.dataset.tokenize(input_sentence)
         source_ids = [self.dataset.source_word2id.get(token, self.dataset.source_unk) for token in tokens]
 
-        # Convert ids to tensor
-        source_tensor = torch.tensor(source_ids).view(-1, 1)
-
-        # Compute length of input sentence
-        source_len = torch.tensor([len(source_ids)])
-
-        # Feed the tokenized sentence into the model
+        self.eval()
         with torch.no_grad():
-            encoder_outputs, hidden = self.model.encoder(source_tensor, source_len)
+        # Convert ids to tensor
+            source_x = torch.tensor(source_ids).view(-1, 1)
+            source_x_lens = torch.tensor([len(source_ids)])
 
-            # Initialize the decoder input with the <sos> token
-            decoder_input = torch.tensor([[self.dataset.target_sos]])
+            # Compute length of input sentence
+            target_y = self(source_x, source_x_lens)[:, :, 0]
+            
+            # Get the predictions (ids)
+            pred = target_y.squeeze(1).tolist()
 
-            # Initialize the decoder hidden state with the encoder hidden state
-            decoder_hidden = hidden
-
-            # Initialize a list to hold the decoded tokens
-            decoded_tokens = []
-
-            # Decode the output of the sentence into a string
-            for _ in range(self.dataset.max_target_len):
-                # Compute the scores for the next token
-                scores, decoder_hidden = self.model.decoder(decoder_input, decoder_hidden, encoder_outputs)
-
-                # Get the index of the token with the highest score
-                top_index = scores.argmax(1)
-
-                if top_index.item() == self.dataset.target_eos:
-                    # If end, break.
+            # Convert ids to words
+            rslt = []
+            for i in range(1, len(pred)):
+                word = pred[i]
+                if word == self.target_eos:
+                    # If word is end of sentence, break
                     break
-
-                # Append the decoded token to the list
-                decoded_tokens.append(self.dataset.target_id2word[top_index.item()])
-
-                # Update the decoder input with the top token
-                decoder_input = top_index.view(-1, 1)
-
-            # Convert the decoded tokens to a string
-            output_sentence = ' '.join(decoded_tokens)
-
-        return output_sentence
-
-        return
+                rslt.append(self.dataset.target_id2word[word])
+        
+        return ' '.join(rslt)
 
     def get_logits_for_teacher_forcing(
             self,
@@ -585,19 +579,26 @@ class EncoderDecoder(EncoderDecoderBase):
         # 2. Recall an LSTM's cell state is always initialized to zero.
         # 3. Note logits sequence dimension is one shorter than target_y (why?)
 
-        htilde_t = None
-
-        # Logits size
+        # Get first hidden state
+        htilde_t = self.decoder.get_first_hidden_state(h, source_x_lens)
+        
+        if self.cell_type == 'lstm':
+                htilde_t = (htilde_t, torch.zeros_like(htilde_t))
+        
+        # Initialize logits as all zero, with shape = (S - 1, B, V)
         logits = torch.zeros(target_y.shape[0] - 1, h.shape[1], self.target_vocab_size).to(h.device)
-
-        # Iterate through timestep
+        
         for t in range(1, target_y.shape[0]):
+            # Set the last hidden state
             htilde_tm1 = htilde_t
 
-            # Inputs are Etm1 and htilde_tm1
-            logits_t, htilde_t = self.decoder.forward(target_y[t - 1, :], htilde_tm1, h, source_x_lens)
-            logits[t - 1, :, :] = logits_t
-
+            # Recompute the logits and new hidden states
+            # Note that we are using the last token in the real target as input, not the predicted
+            logits_t, htilde_t = self.decoder.forward(target_y[t - 1], htilde_tm1, h, source_x_lens)
+            
+            logits[t - 1] = logits_t
+            
+        # Get all logits
         logits = logits.to(h.device)
         return logits
 
@@ -628,28 +629,34 @@ class EncoderDecoder(EncoderDecoderBase):
         #   torch.{flatten, topk, unsqueeze, expand_as, gather, cat}
         # 2. If you flatten a two-dimensional array of shape z of (X, Y),
         #   then the element z[a, b] maps to z'[a*Y + b]
+        
+        B, K = logpb_tm1.size()
 
         logpb_tm1_repeat = logpb_tm1.unsqueeze(-1).repeat(1, 1, self.target_vocab_size)
 
-        extensions_t = (logpb_tm1_repeat + logpy_t).reshape(logpy_t.shape[0],
+        scores = (logpb_tm1_repeat + logpy_t).reshape(logpy_t.shape[0],
                                                             logpy_t.shape[1] * logpy_t.shape[2])
 
-        logpb_t, indices = extensions_t.topk(logpb_tm1.shape[1], dim=1)
+        # Pick the top ks
+        logpb_t, topk_nodes = torch.topk(scores, k=K, dim=1)
+        
+        # Inverse map it to single dimensional
+        beam_index = (topk_nodes / self.target_vocab_size).unsqueeze(0)
+        word_index = (topk_nodes % self.target_vocab_size).unsqueeze(0)
 
-        valid_prefixes = torch.div(indices, self.target_vocab_size).unsqueeze(0)
-        next_words = torch.remainder(indices, self.target_vocab_size).unsqueeze(0)
+        b_tm1_1 = b_tm1_1.gather(2, beam_index.expand_as(b_tm1_1).type(torch.int64))
 
-        b_tm1_1 = b_tm1_1.gather(2, valid_prefixes.expand_as(b_tm1_1).type(torch.int64))
+        b_t_1 = torch.cat([b_tm1_1, word_index], dim=0)
 
-        b_t_1 = torch.cat([b_tm1_1, next_words], dim=0)
-
-        valid_prefixes = valid_prefixes.reshape(valid_prefixes.shape[1], valid_prefixes.shape[2],
-                                                valid_prefixes.shape[0])
+        beam_index = beam_index.reshape(beam_index.shape[1], beam_index.shape[2],
+                                                beam_index.shape[0])
 
         if self.cell_type == 'lstm':
-            b_t_0 = (htilde_t[0].gather(1, valid_prefixes.expand_as(htilde_t[0]).type(torch.int64)),
-                     htilde_t[1].gather(1, valid_prefixes.expand_as(htilde_t[1]).type(torch.int64)))
+            hidden = htilde_t[0]
+            cell = htilde_t[1]
+            b_t_0 = (hidden.gather(1, beam_index.expand_as(hidden).type(torch.int64)),
+                     cell.gather(1, beam_index.expand_as(cell).type(torch.int64)))
         else:
-            b_t_0 = htilde_t.gather(1, valid_prefixes.expand_as(htilde_t).type(torch.int64))
+            b_t_0 = htilde_t.gather(1, beam_index.expand_as(htilde_t).type(torch.int64))
 
         return logpb_t, b_t_0, b_t_1
